@@ -183,211 +183,6 @@ using Microsoft.Win32;
 using System;
 using System.Runtime.InteropServices;
 
-    public class CpuInstructionResult
-    {
-        public bool HasSSE42 { get; set; }
-        public bool HasPopCnt { get; set; }
-        public string Message { get; set; }
-    }
-
-    public class CpuInstructionChecker
-    {
-        [StructLayout(LayoutKind.Sequential)]
-        public struct CPUID_REGISTERS
-        {
-            public uint EAX;
-            public uint EBX;
-            public uint ECX;
-            public uint EDX;
-        }
-
-        [DllImport("kernel32.dll")]
-        static extern IntPtr GetCurrentProcess();
-
-        [DllImport("kernel32.dll")]
-        static extern IntPtr VirtualAllocEx(IntPtr hProcess, IntPtr lpAddress, uint dwSize, uint flAllocationType, uint flProtect);
-
-        [DllImport("kernel32.dll")]
-        static extern bool VirtualFreeEx(IntPtr hProcess, IntPtr lpAddress, uint dwSize, uint dwFreeType);
-
-        [DllImport("kernel32.dll")]
-        static extern bool WriteProcessMemory(IntPtr hProcess, IntPtr lpBaseAddress, byte[] lpBuffer, uint nSize, out UIntPtr lpNumberOfBytesWritten);
-
-        [DllImport("kernel32.dll")]
-        static extern bool ReadProcessMemory(IntPtr hProcess, IntPtr lpBaseAddress, byte[] lpBuffer, uint nSize, out UIntPtr lpNumberOfBytesRead);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        static extern IntPtr CreateThread(IntPtr lpThreadAttributes, uint dwStackSize, IntPtr lpStartAddress, IntPtr lpParameter, uint dwCreationFlags, out uint lpThreadId);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
-
-        [DllImport("kernel32.dll")]
-        static extern bool CloseHandle(IntPtr hObject);
-
-        private const uint MEM_COMMIT = 0x1000;
-        private const uint MEM_RESERVE = 0x2000;
-        private const uint PAGE_EXECUTE_READWRITE = 0x40;
-        private const uint MEM_RELEASE = 0x8000;
-        private const uint INFINITE = 0xFFFFFFFF;
-
-        public static CpuInstructionResult CheckInstructions()
-        {
-            CpuInstructionResult result = new CpuInstructionResult();
-            result.HasSSE42 = false;
-            result.HasPopCnt = false;
-            result.Message = "";
-
-            try
-            {
-                // Try to use registry first (more reliable)
-                string registryPath = @"HARDWARE\DESCRIPTION\System\CentralProcessor\0";
-                using (var key = Registry.LocalMachine.OpenSubKey(registryPath))
-                {
-                    if (key != null)
-                    {
-                        // Check for feature bits
-                        var featureFlags = key.GetValue("FeatureSet") as byte[];
-                        if (featureFlags != null && featureFlags.Length >= 4)
-                        {
-                            // SSE4.2 is typically bit 20 in ECX of CPUID leaf 1
-                            // PopCnt is typically bit 23 in ECX of CPUID leaf 1
-                            // This is a simplified check - actual implementation would be more complex
-                            result.HasSSE42 = true;
-                            result.HasPopCnt = true;
-                            result.Message = "CPU instruction check passed via registry";
-                            return result;
-                        }
-                    }
-                }
-
-                // Fallback to CPUID check
-                CPUID_REGISTERS regs = new CPUID_REGISTERS();
-                regs.EAX = 1; // CPUID leaf 1
-
-                // Execute CPUID
-                ExecuteCPUID(ref regs);
-
-                // Check SSE4.2 (bit 20 of ECX)
-                result.HasSSE42 = (regs.ECX & (1 << 20)) != 0;
-
-                // Check POPCNT (bit 23 of ECX)
-                result.HasPopCnt = (regs.ECX & (1 << 23)) != 0;
-
-                result.Message = "CPU instruction check completed";
-            }
-            catch (Exception ex)
-            {
-                result.Message = "Error checking CPU instructions: " + ex.Message;
-            }
-
-            return result;
-        }
-
-        private static void ExecuteCPUID(ref CPUID_REGISTERS regs)
-        {
-            IntPtr hProcess = GetCurrentProcess();
-            IntPtr pMemory = VirtualAllocEx(hProcess, IntPtr.Zero, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-
-            if (pMemory == IntPtr.Zero)
-            {
-                throw new Exception("Failed to allocate memory");
-            }
-
-            try
-            {
-                // x86/x64 CPUID instruction
-                byte[] code = new byte[]
-                {
-                    0x53,                   // push rbx/ebx
-                    0x57,                   // push rdi/edi
-                    0x8B, 0x7C, 0x24, 0x0C, // mov edi, [esp+12] / mov edi, [rsp+12]
-                    0x8B, 0x07,             // mov eax, [edi]
-                    0x8B, 0x5F, 0x08,       // mov ebx, [edi+8]
-                    0x8B, 0x4F, 0x0C,       // mov ecx, [edi+12]
-                    0x8B, 0x57, 0x10,       // mov edx, [edi+16]
-                    0x0F, 0xA2,             // cpuid
-                    0x89, 0x07,             // mov [edi], eax
-                    0x89, 0x5F, 0x08,       // mov [edi+8], ebx
-                    0x89, 0x4F, 0x0C,       // mov [edi+12], ecx
-                    0x89, 0x57, 0x10,       // mov [edi+16], edx
-                    0x5F,                   // pop rdi/edi
-                    0x5B,                   // pop rbx/ebx
-                    0xC3                    // ret
-                };
-
-                UIntPtr bytesWritten;
-                if (!WriteProcessMemory(hProcess, pMemory, code, (uint)code.Length, out bytesWritten))
-                {
-                    throw new Exception("Failed to write code to memory");
-                }
-
-                byte[] buffer = new byte[Marshal.SizeOf(typeof(CPUID_REGISTERS))];
-                IntPtr pRegs = VirtualAllocEx(hProcess, IntPtr.Zero, (uint)buffer.Length, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-
-                if (pRegs == IntPtr.Zero)
-                {
-                    throw new Exception("Failed to allocate memory for registers");
-                }
-
-                try
-                {
-                    // Copy registers to memory
-                    buffer = BitConverter.GetBytes(regs.EAX);
-                    WriteProcessMemory(hProcess, pRegs, buffer, 4, out bytesWritten);
-                    buffer = BitConverter.GetBytes(regs.EBX);
-                    WriteProcessMemory(hProcess, pRegs + 4, buffer, 4, out bytesWritten);
-                    buffer = BitConverter.GetBytes(regs.ECX);
-                    WriteProcessMemory(hProcess, pRegs + 8, buffer, 4, out bytesWritten);
-                    buffer = BitConverter.GetBytes(regs.EDX);
-                    WriteProcessMemory(hProcess, pRegs + 12, buffer, 4, out bytesWritten);
-
-                    // Create thread to execute CPUID
-                    uint threadId;
-                    IntPtr hThread = CreateThread(IntPtr.Zero, 0, pMemory, pRegs, 0, out threadId);
-
-                    if (hThread == IntPtr.Zero)
-                    {
-                        throw new Exception("Failed to create thread");
-                    }
-
-                    try
-                    {
-                        // Wait for thread to complete
-                        if (WaitForSingleObject(hThread, INFINITE) != 0)
-                        {
-                            throw new Exception("Thread execution failed");
-                        }
-
-                        // Read back registers
-                        buffer = new byte[4];
-                        UIntPtr bytesRead;
-                        ReadProcessMemory(hProcess, pRegs, buffer, 4, out bytesRead);
-                        regs.EAX = BitConverter.ToUInt32(buffer, 0);
-                        ReadProcessMemory(hProcess, pRegs + 4, buffer, 4, out bytesRead);
-                        regs.EBX = BitConverter.ToUInt32(buffer, 0);
-                        ReadProcessMemory(hProcess, pRegs + 8, buffer, 4, out bytesRead);
-                        regs.ECX = BitConverter.ToUInt32(buffer, 0);
-                        ReadProcessMemory(hProcess, pRegs + 12, buffer, 4, out bytesRead);
-                        regs.EDX = BitConverter.ToUInt32(buffer, 0);
-                    }
-                    finally
-                    {
-                        CloseHandle(hThread);
-                    }
-                }
-                finally
-                {
-                    VirtualFreeEx(hProcess, pRegs, 0, MEM_RELEASE);
-                }
-            }
-            finally
-            {
-                VirtualFreeEx(hProcess, pMemory, 0, MEM_RELEASE);
-            }
-        }
-    }
-
     public class CpuFamilyResult
     {
         public bool IsValid { get; set; }
@@ -885,76 +680,113 @@ catch {
 # CPU Instructions check (SSE4.2 and PopCnt) - Required for Windows 11 24H2+
 Write-Verbose "Checking CPU instruction set requirements (SSE4.2 and PopCnt)..."
 try {
-    # Fallback method if CpuInstructionChecker is not available
     $cpuInstructionsCheckPassed = $true
     
+    # Use native PowerShell approach to check CPU instructions
+    Write-Verbose "Checking CPU instructions using PowerShell-based detection..."
+    
+    # Get CPU details
+    $cpuName = $cpuDetails.Name
+    $cpuManufacturer = $cpuDetails.Manufacturer
+    $hasSSE42 = $true
+    $hasPopCnt = $true
+    $detectionMethod = "Unknown"
+    
+    # Try registry check for CPU identifier
     try {
-        # Try to use the C# class we defined
-        Write-Verbose "Using C# implementation to check CPU instructions..."
-        $cpuInstructionResult = [CpuInstructionChecker]::CheckInstructions()
-        $result.processor.cpuInstructions.sse42 = $cpuInstructionResult.HasSSE42
-        $result.processor.cpuInstructions.popCnt = $cpuInstructionResult.HasPopCnt
+        $registryPath = "HKLM:\HARDWARE\DESCRIPTION\System\CentralProcessor\0"
+        $identifier = Get-ItemProperty -Path $registryPath -Name "Identifier" -ErrorAction SilentlyContinue
         
-        Write-Verbose "CPU instruction check results: SSE4.2: $($cpuInstructionResult.HasSSE42), PopCnt: $($cpuInstructionResult.HasPopCnt)"
-        Write-Verbose "Message from CPU instruction checker: $($cpuInstructionResult.Message)"
-        
-        if (-not ($cpuInstructionResult.HasSSE42 -and $cpuInstructionResult.HasPopCnt)) {
-            $cpuInstructionsCheckPassed = $false
+        if ($identifier) {
+            $cpuIdentifier = $identifier.Identifier
+            Write-Verbose "CPU Identifier from registry: $cpuIdentifier"
+            $detectionMethod = "Registry CPU Identifier"
+            
+            # Intel CPU family/model detection
+            if ($cpuManufacturer -match "Intel") {
+                if ($cpuIdentifier -match "Family (\d+) Model (\d+)") {
+                    $family = [int]$Matches[1]
+                    $model = [int]$Matches[2]
+                    
+                    # Intel Nehalem (1st gen Core i, family 6, model >= 26) and newer support SSE4.2/PopCnt
+                    if ($family -lt 6 -or ($family -eq 6 -and $model -lt 26)) {
+                        $hasSSE42 = $false
+                        $hasPopCnt = $false
+                        Write-Verbose "Older Intel CPU detected (Family $family, Model $model), may not support SSE4.2/PopCnt"
+                    }
+                    else {
+                        Write-Verbose "Modern Intel CPU detected (Family $family, Model $model), supports SSE4.2/PopCnt"
+                    }
+                }
+            }
+            # AMD CPU detection
+            elseif ($cpuManufacturer -match "AMD") {
+                if ($cpuIdentifier -match "Family (\d+)") {
+                    $family = [int]$Matches[1]
+                    
+                    # AMD Bulldozer (family 15h/21) and newer support these instructions
+                    if ($family -lt 15) {
+                        $hasSSE42 = $false
+                        $hasPopCnt = $false
+                        Write-Verbose "Older AMD CPU detected (Family $family), may not support SSE4.2/PopCnt"
+                    }
+                    else {
+                        Write-Verbose "Modern AMD CPU detected (Family $family), supports SSE4.2/PopCnt"
+                    }
+                }
+            }
         }
     }
     catch {
-        # Fallback to registry check
-        Write-Verbose "C# implementation failed, falling back to CPU model check..."
-        try {
-            # Most modern CPUs (post-2010) support SSE4.2 and PopCnt
-            # For Intel, this is Nehalem (1st gen Core i) and newer
-            # For AMD, this is Bulldozer and newer
-            
-            # Check CPU model for known compatibility
-            $cpuName = $cpuDetails.Name
-            $cpuManufacturer = $cpuDetails.Manufacturer
-            Write-Verbose "Checking CPU model: $cpuName (Manufacturer: $cpuManufacturer)"
-            
-            # Default to true for modern CPUs
-            $hasSSE42 = $true
-            $hasPopCnt = $true
-            
-            # Check for very old CPUs that might not support these instructions
-            if ($cpuManufacturer -match "Intel" -and 
-                ($cpuName -match "Pentium 4" -or 
-                 $cpuName -match "Core 2" -or 
-                 $cpuName -match "Atom" -and $cpuName -match "N[2-4]" -or
-                 $cpuName -match "Celeron" -and [int]($cpuName -replace ".*?(\d{3}).*", '$1') -lt 800)) {
+        Write-Verbose "Registry check failed: $($_.Exception.Message)"
+    }
+    
+    # Fallback to CPU name pattern matching if registry check didn't work
+    if ($detectionMethod -eq "Unknown") {
+        $detectionMethod = "CPU Name Pattern"
+        Write-Verbose "Using CPU name pattern matching: $cpuName"
+        
+        # Default to true for modern CPUs
+        $hasSSE42 = $true
+        $hasPopCnt = $true
+        
+        # Check for very old CPUs that might not support these instructions
+        if ($cpuManufacturer -match "Intel") {
+            if ($cpuName -match "Pentium 4" -or 
+                $cpuName -match "Core 2" -or 
+                ($cpuName -match "Atom" -and $cpuName -match "N[2-4]") -or
+                ($cpuName -match "Celeron" -and $cpuName -match "\d{3}" -and 
+                 [int]($cpuName -replace ".*?(\d{3}).*", '$1') -lt 800)) {
                 $hasSSE42 = $false
                 $hasPopCnt = $false
                 Write-Verbose "Detected older Intel CPU that likely doesn't support required instructions"
             }
-            elseif ($cpuManufacturer -match "AMD" -and 
-                   ($cpuName -match "Athlon II" -or 
-                    $cpuName -match "Phenom" -or
-                    $cpuName -match "Turion")) {
+            elseif ($cpuName -match "i\d-\d{4}|i\d-\d{5}|Xeon|Core i\d") {
+                Write-Verbose "Detected modern Intel CPU that supports required instructions"
+            }
+        }
+        elseif ($cpuManufacturer -match "AMD") {
+            if ($cpuName -match "Athlon II" -or 
+                $cpuName -match "Phenom" -or
+                $cpuName -match "Turion") {
                 $hasSSE42 = $false
                 $hasPopCnt = $false
                 Write-Verbose "Detected older AMD CPU that likely doesn't support required instructions"
             }
-            else {
-                Write-Verbose "CPU model appears to be modern enough to support required instructions"
-            }
-            
-            $result.processor.cpuInstructions.sse42 = $hasSSE42
-            $result.processor.cpuInstructions.popCnt = $hasPopCnt
-            
-            if (-not ($hasSSE42 -and $hasPopCnt)) {
-                $cpuInstructionsCheckPassed = $false
+            elseif ($cpuName -match "Ryzen|FX-\d{4}") {
+                Write-Verbose "Detected modern AMD CPU that supports required instructions"
             }
         }
-        catch {
-            # If all else fails, assume modern CPUs support these instructions
-            # This is a reasonable assumption for any CPU that can run Windows 10/11
-            Write-Verbose "CPU model check failed, assuming modern CPU with required instructions"
-            $result.processor.cpuInstructions.sse42 = $true
-            $result.processor.cpuInstructions.popCnt = $true
-        }
+    }
+    
+    # Set the results
+    $result.processor.cpuInstructions.sse42 = $hasSSE42
+    $result.processor.cpuInstructions.popCnt = $hasPopCnt
+    
+    Write-Verbose "CPU instruction check results: SSE4.2: $hasSSE42, PopCnt: $hasPopCnt (Detection method: $detectionMethod)"
+    
+    if (-not ($hasSSE42 -and $hasPopCnt)) {
+        $cpuInstructionsCheckPassed = $false
     }
     
     $result.processor.cpuInstructions.passed = $cpuInstructionsCheckPassed
