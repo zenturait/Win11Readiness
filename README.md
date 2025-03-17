@@ -39,6 +39,14 @@ Run this single command in an elevated PowerShell prompt to download and execute
 Invoke-Expression (New-Object System.Net.WebClient).DownloadString('https://raw.githubusercontent.com/zenturait/Win11Readiness/refs/heads/main/HardwareReadiness.ps1')
 ```
 
+### For Support Personnel
+
+Use this command to run the script, save detailed results as JSON, and copy to clipboard for support analysis:
+
+```powershell
+$result = Invoke-Expression (New-Object System.Net.WebClient).DownloadString('https://raw.githubusercontent.com/zenturait/Win11Readiness/refs/heads/main/HardwareReadiness.ps1'); $result | ConvertTo-Json -Depth 10 | Set-Clipboard; Write-Host "Windows 11 compatibility results copied to clipboard for support analysis" -ForegroundColor Green
+```
+
 ## License
 
 This script is distributed under the MIT license.
