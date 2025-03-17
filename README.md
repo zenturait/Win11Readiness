@@ -36,7 +36,7 @@ This script requires elevated privileges (Run as Administrator) for complete har
 Run this single command in an elevated PowerShell prompt to download and execute the script:
 
 ```powershell
-Invoke-Expression (New-Object System.Net.WebClient).DownloadString('https://raw.githubusercontent.com/zenturait/Win11Readiness/main/HardwareReadiness.ps1')
+Invoke-Expression (New-Object System.Net.WebClient).DownloadString('https://raw.githubusercontent.com/zenturait/Win11Readiness/refs/heads/main/HardwareReadiness.ps1')
 ```
 
 ## License
