@@ -37,24 +37,69 @@ Install the script to your PowerShell Scripts folder (similar to PowerShell Gall
 
 ```powershell
 # Run in an elevated PowerShell prompt
-$ScriptsFolder = if ($PSVersionTable.PSVersion.Major -ge 6) { 
-    "$env:USERPROFILE\Documents\PowerShell\Scripts" 
-} else { 
-    "$env:USERPROFILE\Documents\WindowsPowerShell\Scripts" 
+
+# Find the Documents folder path from the registry (works with OneDrive redirection)
+function Get-DocumentsPath {
+    try {
+        $shell = New-Object -ComObject Shell.Application
+        $documentsFolder = $shell.NameSpace(0x5).Self.Path
+        return $documentsFolder
+    }
+    catch {
+        # Fallback method using registry
+        try {
+            $regKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders"
+            $documentsPath = (Get-ItemProperty -Path $regKey -Name "Personal").Personal
+            return $documentsPath
+        }
+        catch {
+            # Final fallback
+            return [Environment]::GetFolderPath("MyDocuments")
+        }
+    }
 }
 
+$DocumentsPath = Get-DocumentsPath
+Write-Host "Documents folder detected at: $DocumentsPath" -ForegroundColor Cyan
+
+# Determine the correct PowerShell scripts folder
+$ScriptsFolder = if ($PSVersionTable.PSVersion.Major -ge 6) { 
+    Join-Path -Path $DocumentsPath -ChildPath "PowerShell\Scripts"
+} else { 
+    Join-Path -Path $DocumentsPath -ChildPath "WindowsPowerShell\Scripts"
+}
+
+Write-Host "Installing to PowerShell Scripts folder: $ScriptsFolder" -ForegroundColor Cyan
+
 # Create Scripts folder if it doesn't exist
-if (!(Test-Path $ScriptsFolder)) { New-Item -Path $ScriptsFolder -ItemType Directory -Force }
+if (!(Test-Path $ScriptsFolder)) { 
+    New-Item -Path $ScriptsFolder -ItemType Directory -Force
+    Write-Host "Created Scripts folder" -ForegroundColor Yellow
+}
 
 # Download and save the script
-Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/zenturait/Win11Readiness/main/HardwareReadiness.ps1' -OutFile "$ScriptsFolder\HardwareReadiness.ps1"
+$scriptPath = Join-Path -Path $ScriptsFolder -ChildPath "HardwareReadiness.ps1"
+Write-Host "Downloading script..." -ForegroundColor Cyan
+Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/zenturait/Win11Readiness/main/HardwareReadiness.ps1' -OutFile $scriptPath
 
-# Verify the script was downloaded
-if (Test-Path "$ScriptsFolder\HardwareReadiness.ps1") {
-    Write-Host "Script installed successfully to $ScriptsFolder\HardwareReadiness.ps1" -ForegroundColor Green
+# Unblock the file to prevent security warnings
+if (Test-Path $scriptPath) {
+    Write-Host "Unblocking file..." -ForegroundColor Cyan
+    Unblock-File -Path $scriptPath
+    
+    Write-Host "Script installed successfully to $scriptPath" -ForegroundColor Green
     Write-Host "You can now run it using: HardwareReadiness" -ForegroundColor Green
 } else {
     Write-Host "Failed to install script" -ForegroundColor Red
+}
+
+# Add to PATH if not already in path
+$env:Path -split ';' | Where-Object { $_ -eq $ScriptsFolder } | Out-Null
+if ($?) {
+    Write-Host "Scripts folder is already in PATH" -ForegroundColor Cyan
+} else {
+    Write-Host "Note: For best results, consider adding the Scripts folder to your PATH:" -ForegroundColor Yellow
+    Write-Host "    [Environment]::SetEnvironmentVariable('Path', `$env:Path + ';$ScriptsFolder', 'User')" -ForegroundColor Yellow
 }
 ```
 
